@@ -66,7 +66,7 @@ class CryoConnectorAPI():
 	def get(self, name):
 		""" Reads the desired property or info from the parsed status.xml object. Does not parse the file, so any data
 			is only as recent as the last time self.updateStatus() was called!
-			:param name: Name of te property or info item to be read. """
+			:param name: Name of the property or info item to be read. """
 		result = None
 		for element in self.prop_list:
 			if element.attrib.get('name') == name:
@@ -187,7 +187,7 @@ class CryoConnectorAPI():
 				if not params == len(self.setp):
 					raise Exception(r'"{}" takes exactly {} arguments ({} given)'.format(name, params, len(self.setp)))
 				break
-		if command==0:
+		if command == 0:
 			raise Exception(r'Command "{}" not found. Check spelling or refer to {}'.format(name, self.properties_path))
 
 		# Add connection ID and remove description element from command object.
