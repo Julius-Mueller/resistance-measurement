@@ -109,11 +109,12 @@ class CryoConnectorAPI():
 			row_id = self.tree.focus()
 			if not row_id:
 				# tree.focus method returns empty string when no item is selected.
-				raise Exception('Nothing selected!')
-			index = self.tree.index(row_id)
-			self.cryo_id = self.active_cons[index]
-			self.cryo_port = self.con_root[self.cryo_id].attrib.get('port')
-			self.chooseWindow.destroy()
+				print 'Nothing selected!'
+			else:
+				index = self.tree.index(row_id)
+				self.cryo_id = self.active_cons[index]
+				self.cryo_port = self.con_root[self.cryo_id].attrib.get('port')
+				self.chooseWindow.destroy()
 		except:
 			if (__name__ == "__main__"):
 				if tkMessageBox.askokcancel(title='Continue without cryostat?',
@@ -165,8 +166,8 @@ class CryoConnectorAPI():
 		self.chooseWindow.lift()
 		self.chooseWindow.wait_window()
 
-		if not self.cryo_port:
-			raise Exception('Cryostat selection cancelled by user.')
+		#if not self.cryo_port:
+		#	raise Exception('Cryostat selection cancelled by user.')
 
 	# Commands - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 

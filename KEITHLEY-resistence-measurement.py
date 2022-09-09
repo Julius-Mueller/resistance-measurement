@@ -1,5 +1,6 @@
-""" Connect to KEITHLEY SourceMeter and NanovoltMeter, start resistance
-	measurement in Delta-mode and write data to file.
+""" This program provides a GUI based tool for automated temperature
+	dependent resistance measurements using Keithley nanovolt and source
+	meters as well as optionally a variety of cryo-cooling hardware.
 """
 
 import os
@@ -12,13 +13,20 @@ from threading import Thread
 
 import csv
 import numpy as np
+
+import matplotlib
+matplotlib.use("TkAgg")
+from matplotlib.backends.backend_tkagg import (
+	FigureCanvasTkAgg, NavigationToolbar2TkAgg)
+from matplotlib.figure import Figure
+
 import matplotlib.pyplot as plt
-# plt.switch_backend('GTKAgg')
 from matplotlib.widgets import Button, TextBox
 
 import pyvisa as visa
 from Cryostat import Cryostat
 
+import warnings
 
 class ResistanceMeasurement:
 
@@ -45,6 +53,7 @@ class ResistanceMeasurement:
 		self.I_max = 1e-3					# Max safe current
 		self.I_compliance = 1e-3			# Compliance current limit
 		self.I = self.I_min					# Current setpoint in A
+		self.I_opt = self.I_min				# Optimal calibrated setp.
 		self.U_min = 5e-6					# Min sourcemeter voltage
 		self.U_max = 21.0					# Max safe voltage
 		self.U_compliance = 5.9				# Compliance voltage limit
@@ -56,12 +65,21 @@ class ResistanceMeasurement:
 		self.XRDlist = ('None',)			# List of XRD sweep names
 		self.latestDataPoint = np.array([])	# Latest measurement data
 
-		self.stopFlag = 0					# All activity stop flag
+		self.stopFlag = 0					# All measurements stop flag
 		self.stopContinuousFlag = 0			# Cont. R-meas. stop flag
+		self.exitFlag = 0					# Program has exited flag
+		self.plot_request_flag = 0			# Diagram update req. flag
+		self.plot_request_function = ''		# Arg. for updatePlot fct.
+		self.calibrationFinishedFlag = 0	# Cal. fin. user prompt flag
 
 		self.stopButtonActive = 0			# Stop btn. operational y/n
 		self.continuousActive = 0			# Cont. R-meas. active y/n
 		self.calibrateActive = 0			# I-calibration active y/n
+
+		path = "TA_to_Tsample_calibration_curve_shield.csv"
+		self.calibrationCurve_TA_to_Tsample = path
+		path = "Tsample_to_TA_calibration_curve_shield.csv"
+		self.calibrationCurve_Tsample_to_TA = path
 
 		self.fig, self.ax = plt.subplots()  # Initiate GUI root window
 		self.scatterplot = self.ax.scatter([], [], c='blue')
@@ -74,6 +92,13 @@ class ResistanceMeasurement:
 		self.use_keit = 0					# Use KEITHLEY hardware y/n
 		self.use_cryo = 0					# Use cryostat hardware y/n
 		self.use_apex = 0					# Use Bruker APEX PC y/n
+
+		self.root = tk.Tk()
+		self.root.withdraw()
+
+		self.A = 2.0
+		self.B = 1.0
+		self.C = 1.0
 
 		self.start()
 
@@ -197,7 +222,7 @@ class ResistanceMeasurement:
 		# Keithley device addresses range from 0-30
 		ports = range(31)
 
-		self.keithleyWindow = tk.Toplevel()
+		self.keithleyWindow = tk.Toplevel(master=self.startWindow)
 		self.keithleyWindow.title('Connect to KEITHLEY hardware')
 
 		sms = tk.Label(self.keithleyWindow, text='Please select the appropriate Ports:')
@@ -250,11 +275,12 @@ class ResistanceMeasurement:
 
 		elif (self.use_keit, self.use_cryo, self.use_apex) == (1, 0, 0):
 			self.startWindow.destroy()
-			self.temperatureRun()
+			#self.temperatureRun()
+			self.temperatureAutoRunNew()
 
 		elif (self.use_keit, self.use_cryo, self.use_apex) == (1, 1, 0):
 			self.startWindow.destroy()
-			self.temperatureAutoRun()
+			self.temperatureAutoRunNew()
 
 		else:
 			self.startWindow.destroy()
@@ -263,37 +289,52 @@ class ResistanceMeasurement:
 		""" Asks the user which hardware to connect to and starts the
 		measurement GUI.
 		"""
-		self.startWindow = tk.Toplevel()
+		self.startWindow = tk.Toplevel() # when master=root, text breaks
 		self.startWindow.title('Configure hardware')
 
-		sm0 = tk.Label(self.startWindow, text='Please choose which hardware to connect to:')
+		sm0 = tk.Label(self.startWindow,
+					   text='Please choose which hardware to connect to:')
 		sm0.grid(row=0, column=0, rowspan=2, columnspan=2, padx=30, pady=30)
 
-		sb0 = tk.Button(self.startWindow, text='Source- & Voltmeter', command=self._addKeithleysButton)
+		sb0 = tk.Button(self.startWindow,
+						text='Source- & Voltmeter',
+						command=self._addKeithleysButton)
 		sb0.grid(row=2, column=0, padx=20, sticky='EW')
 
 		self.text0 = tk.StringVar()
 		self.text0.set('no device selected')
-		sl0 = tk.Label(self.startWindow, textvariable=self.text0, font='Helvetica 9 italic')
+		sl0 = tk.Label(self.startWindow,
+					   textvariable=self.text0,
+					   font='Helvetica 9 italic')
 		sl0.grid(row=2, column=1, sticky='W')
 
-		sb1 = tk.Button(self.startWindow, text='Cryostat', command=self._addCryostatButton)
+		sb1 = tk.Button(self.startWindow,
+						text='Cryostat',
+						command=self._addCryostatButton)
 		sb1.grid(row=3, column=0, padx=20, sticky='EW')
 
 		self.text1 = tk.StringVar()
 		self.text1.set('no device selected')
-		sl1 = tk.Label(self.startWindow, textvariable=self.text1, font='Helvetica 9 italic')
+		sl1 = tk.Label(self.startWindow,
+					   textvariable=self.text1,
+					   font='Helvetica 9 italic')
 		sl1.grid(row=3, column=1, sticky='W')
 
-		sb2 = tk.Button(self.startWindow, text='Bruker APEX PC')
+		sb2 = tk.Button(self.startWindow,
+						text='Bruker APEX PC',
+						state='disabled')
 		sb2.grid(row=4, column=0, padx=20, sticky='EW')
 
 		self.text2 = tk.StringVar()
 		self.text2.set('no device selected')
-		sl2 = tk.Label(self.startWindow, textvariable=self.text2, font='Helvetica 9 italic')
+		sl2 = tk.Label(self.startWindow,
+					   textvariable=self.text2,
+					   font='Helvetica 9 italic')
 		sl2.grid(row=4, column=1, sticky='W')
 
-		sb3 = tk.Button(self.startWindow, text='OK', command=self._startOkButton)
+		sb3 = tk.Button(self.startWindow,
+						text='OK',
+						command=self._startOkButton)
 		sb3.grid(column=1, padx=20, pady=20, sticky='E')
 
 		self.startWindow.wait_window()
@@ -421,7 +462,8 @@ class ResistanceMeasurement:
 
 		self.K2401.write(":OUTP ON")
 
-		path = os.path.join(self.cwd, 'cali.out')
+		#path = os.path.join(self.cwd, 'cali.out')
+		path = self.filePath
 		with open(path, 'w') as file:
 			for line in self.CaliHead:
 				string = self.delimiter.join(str(x) for x in line)
@@ -555,7 +597,8 @@ class ResistanceMeasurement:
 		self.K2401.write(":SOUR:VOLT:LEV {:.2e}".format(self.U))
 		self.K2401.write(":OUTP ON")
 
-		path = os.path.join(self.cwd, 'IVcurve.out')
+		#path = os.path.join(self.cwd, 'IVcurve.out')
+		path = self.filePath
 		with open(path, 'w') as file:
 			for line in self.IVcurveHead:
 				string = self.delimiter.join(str(x) for x in line)
@@ -720,6 +763,286 @@ class ResistanceMeasurement:
 			R_source = R_source[0]
 		return U_sample, R_sample, U_source, I_source, R_source
 
+	def calibrateNew(self, n=10, step=10, wait=0.0, plot=0):
+		""" Ramps up the voltage and maps current.
+
+		:param n: The number of measurements per voltage setting
+		:param step: The multiplicative increase of the voltage
+		setpoint
+		:param wait: Time in s to wait between measurements of I
+		:param plot: Boolean to determine whether to self.updatePlot
+		"""
+		while self.calibrationFinishedFlag:
+			time.sleep(0.01)
+		reachedEnd = 0
+		self.U = self.U_min
+
+		t0 = time.time()
+
+		self.IVcurveHead = np.array([["T_sample", "T_cryo", "U_setpoint", "U_sample", "R_sample", "DR", "U_source", "I_source", "R_source", "t"],
+							 ["K", "K", "V", "V", "Ohms", "Ohms", "V", "A", "Ohms", "s"]])
+
+		# set to supply voltage
+		self.K2401.write(":SOUR:FUNC VOLT")
+		self.K2401.write(":SOUR:VOLT:LEV {:.2e}".format(self.U))
+		self.K2401.write(":OUTP ON")
+
+		path = self.filePath
+		with open(path, 'w') as file:
+			for line in self.IVcurveHead:
+				string = self.delimiter.join(str(x) for x in line)
+				file.write(string + '\n')
+
+		# The below while loop will fill in these arrays using the
+		# append method, and the counter 'k' to read the latest entry.
+		U_stp = np.array([])
+		U_avg = np.array([])
+		R_avg = np.array([])
+		DR = np.array([])
+		I_avg = np.array([])
+
+		k = 0
+		while self.stopFlag == 0:
+			if (abs(self.U) >= self.U_max):
+				if reachedEnd:
+					self.U = self.U_min
+					break
+				else:
+					self.U = self.U_max
+					reachedEnd = 1
+			print "Calibrating... I = {} V".format(self.U)
+
+			# n times current with self.U in one direction (plus)
+			T_sample = np.zeros(n)
+			T_cryo = np.zeros(n)
+			U_sample = np.zeros(n)
+			R_sample = np.zeros(n)
+			U_source = np.zeros(n)
+			I_source = np.zeros(n)
+			R_source = np.zeros(n)
+			t = np.zeros(n)
+
+			self.K2401.write(":SOUR:VOLT:LEV {:.2e}".format(self.U))
+			for i in range(n):
+				if self.stopFlag:
+					break
+
+				self.K2401.write(":SOUR:VOLT:LEV {:.2e}".format(self.U))
+
+				if not ((abs(self.U) == self.U_min) and (i == 0)):
+					time.sleep(wait)
+
+				if self.use_cryo:
+					self.cryostat.updateStatus()
+					self.T_cryo = T_cryo[i] = self.cryostat.cryoTemp
+					self.T_sample = T_sample[i] = self.cryostat.sampleTemp
+				else:
+					T_sample[i] = self.T_sample
+					T_cryo[i] = self.T_cryo
+
+				t[i] = time.time() - t0
+				# Sourcemeter voltage, current and resistance
+				U_source[i], I_source[i], R_source[i] = self.sense_UIR()
+				# Voltmeter voltage at sample
+				self.K2182.write(":READ?")
+				U_sample[i] = float(self.K2182.read())
+				R_sample[i] = U_sample[i] / I_source[i]
+
+				self.latestDataPoint = np.array([U_source[i], I_source[i]])
+				if plot:
+					#self._temperatureAutoRunNew_updatePlot(function='IVcurve')
+					while self.plot_request_flag:
+						# wait for previous plot call to finish
+						time.sleep(0.01)
+					self.plot_request_function = 'IVcurve'
+					self.plot_request_flag = 1
+
+			if self.stopFlag:
+				break
+
+			# Compute secondary values (avg etc.) and write to file
+			U_stp = np.append(U_stp, self.U)
+			U_avg = np.append(U_avg, np.average(U_source))
+			R_avg = np.append(R_avg, np.average(R_sample))
+			DR = np.append(DR, np.std(R_sample))
+			I_avg = np.append(I_avg, np.average(I_source))
+			with open(path, 'a') as file:
+				for i in range(n):
+					data = np.array([T_sample[i],
+									 T_cryo[i],
+									 self.U,
+									 U_sample[i],
+									 R_sample[i],
+									 DR[k],
+									 U_source[i],
+									 I_source[i],
+									 R_source[i],
+									 t[i]])
+					data_string = self.delimiter.join(str(x) for x in data)
+					file.write(data_string + '\n')
+
+			self.latestDataPoint = np.array([I_avg[k], R_avg[k], DR[k]])
+			if plot:
+				#self._temperatureAutoRunNew_updatePlot(function='calibrate')
+				while self.plot_request_flag:
+					# wait for previous plot call to finish
+					time.sleep(0.01)
+				self.plot_request_function = 'calibrate'
+				self.plot_request_flag = 1
+
+			k += 1
+			self.U = -self.U
+
+			# n times resistance with self.I in other direction (minus)
+			T_sample = np.zeros(n)
+			T_cryo = np.zeros(n)
+			U_sample = np.zeros(n)
+			R_sample = np.zeros(n)
+			U_source = np.zeros(n)
+			I_source = np.zeros(n)
+			R_source = np.zeros(n)
+			t = np.zeros(n)
+
+			self.K2401.write(":SOUR:VOLT:LEV {:.2e}".format(self.U))
+			for i in range(n):
+				if self.stopFlag:
+					break
+
+				if not ((abs(self.U) == self.U_min) and (i == 0)):
+					time.sleep(wait)
+
+				if self.use_cryo:
+					self.cryostat.updateStatus()
+					self.T_cryo = T_cryo[i] = self.cryostat.cryoTemp
+					self.T_sample = T_sample[i] = self.cryostat.sampleTemp
+				else:
+					T_cryo[i] = self.T_cryo
+					T_sample[i] = self.T_sample
+
+				t[i] = time.time() - t0
+				# Sourcemeter voltage, current and resistance
+				U_source[i], I_source[i], R_source[i] = self.sense_UIR()
+				# Voltmeter voltage at sample
+				self.K2182.write(":READ?")
+				U_sample[i] = float(self.K2182.read())
+				R_sample[i] = U_sample[i] / I_source[i]
+
+				self.latestDataPoint = np.array([U_source[i], I_source[i]])
+				if plot:
+					#self._temperatureAutoRunNew_updatePlot(function='IVcurve')
+					while self.plot_request_flag:
+						# wait for previous plot call to finish
+						time.sleep(0.01)
+					self.plot_request_function = 'IVcurve'
+					self.plot_request_flag = 1
+
+			if self.stopFlag:
+				break
+
+			# Compute secondary values (avg etc.) and write to file
+			U_stp = np.append(U_stp, self.U)
+			U_avg = np.append(U_avg, np.average(U_source))
+			R_avg = np.append(R_avg, np.average(R_sample))
+			DR = np.append(DR, R_sample.std())
+			I_avg = np.append(I_avg, np.average(I_source))
+			with open(path, 'a') as file:
+				for i in range(n):
+					data = np.array([T_sample[i],
+									 T_cryo[i],
+									 self.U,
+									 U_sample[i],
+									 R_sample[i],
+									 DR[k],
+									 U_source[i],
+									 I_source[i],
+									 R_source[i],
+									 t[i]])
+					data_string = self.delimiter.join(str(x) for x in data)
+					file.write(data_string + '\n')
+
+			self.latestDataPoint = np.array([I_avg[k], R_avg[k], DR[k]])
+			if plot:
+				#self._temperatureAutoRunNew_updatePlot(function='calibrate')
+				while self.plot_request_flag:
+					# wait for previous plot call to finish
+					time.sleep(0.01)
+				self.plot_request_function = 'calibrate'
+				self.plot_request_flag = 1
+
+			k += 1
+			self.U = -self.U
+
+#			avgplus = Rarrayplus.sum()/n
+#			avgminus = Rarrayminus.sum()/n
+#			stdplus = Rarrayplus.std()
+#			stdminus = Rarrayminus.std()
+#			avg = (avgplus + avgminus)/2
+#			std = (stdplus + stdminus)/2
+#			rel = abs(std/avg)
+#			print "Spread = {} %\n".format(rel*100)
+#			if rel < rel_max:
+#				print "Calibration successful: Current setpoint set to " \
+#					  "{} A.\n".format(self.I)
+#				break
+			self.U = step * self.U
+
+		# turn off output
+		self.K2401.write(":OUTP OFF")
+		# set to supply current
+		self.K2401.write(":SOUR:FUNC CURR")
+		self.calibrateActive = 0
+
+		if len(I_avg) >= 6:
+			# Positive voltages branch:
+			U_stp_pos = U_stp[U_stp>0]
+			U_avg_pos = U_avg[U_stp>0]
+			R_avg_pos = R_avg[U_stp>0]
+			DR_pos = DR[U_stp>0]
+			I_avg_pos = I_avg[U_stp>0]
+			n_pos = len(U_stp_pos)
+
+			# Gradient of the positive IV branch
+			I_1abl_pos = np.gradient(I_avg_pos, U_avg_pos)
+			I_2abl_pos = np.gradient(I_1abl_pos, U_avg_pos)
+
+			# Negative voltages branch:
+			U_stp_neg = U_stp[U_stp<0]
+			U_avg_neg = U_avg[U_stp<0]
+			R_avg_neg = R_avg[U_stp<0]
+			DR_neg = DR[U_stp<0]
+			I_avg_neg = I_avg[U_stp<0]
+			n_neg = len(U_stp_neg)
+
+			# Gradient for the negative IV branch
+			I_1abl_neg = np.gradient(I_avg_neg, U_avg_neg)
+			I_2abl_neg = np.gradient(I_1abl_neg, U_avg_neg)
+
+			# Calculate merit function which takes into account linearity
+			# (ohmic behavior), statistical uncertainty (precision) and
+			# voltage square (ohmic heating power)
+			f1_pos = np.abs(I_2abl_pos) / np.max(np.abs(I_2abl_pos))
+			f2_pos = DR_pos / np.max(DR_pos)
+			f3_pos = np.abs(U_avg_pos**2) / np.max(np.abs(U_avg_pos**2))
+			merit_function_pos = self.A * f1_pos + self.B * f2_pos + self.C * f3_pos
+
+			f1_neg = np.abs(I_2abl_neg) / np.max(np.abs(I_2abl_neg))
+			f2_neg = DR_neg / np.max(DR_neg)
+			f3_neg = np.abs(U_avg_neg**2) / np.max(np.abs(U_avg_neg**2))
+			merit_function_neg = self.A * f1_neg + self.B * f2_neg + self.C * f3_neg
+
+			merit_function_tot = merit_function_neg + merit_function_pos[:n_neg]
+
+			index_opt_pos = np.argmin(merit_function_pos)
+			index_opt_neg = np.argmin(merit_function_neg)
+			index_opt_tot = np.argmin(merit_function_tot)
+			print merit_function_tot
+			print index_opt_tot
+
+			self.U_opt = U_stp_pos[index_opt_tot]
+			self.I_opt = I_avg_pos[index_opt_tot]
+			self.calibrationFinishedFlag = 1
+
+
 	# GUI components for the different measurement runs  - - - - - - - -
 
 	def stop(self):
@@ -732,7 +1055,6 @@ class ResistanceMeasurement:
 		except AttributeError:
 			pass
 		self.stopButtonActive = self._temperatureAutoRun_updateStopButton('OFF')
-		plt.draw()
 
 	def _temperatureRun_updatePlot(self, function='measure'):
 		""" Updates plot with latest data. Changes axes depending on
@@ -752,7 +1074,8 @@ class ResistanceMeasurement:
 				self.ax.set_ylabel('Resistance [Ohms]')
 				self.ax.set_xlabel('Temperature [K]')
 
-				path = os.path.join(self.cwd, 'temp.out')
+				#path = os.path.join(self.cwd, 'temp.out')
+				path = self.filePath
 				with open(path, 'r') as file:
 					for line in file.read().splitlines()[2:]:
 						data = [float(x) for x in line.split(',')]
@@ -778,7 +1101,8 @@ class ResistanceMeasurement:
 				self.ax.set_ylabel('Resistance [Ohms]')
 				self.ax.set_xlabel('Time [s]')
 
-				path = os.path.join(self.cwd, 'cali.out')
+				#path = os.path.join(self.cwd, 'cali.out')
+				path = self.filePath
 				with open(path, 'r') as file:
 					for line in file.read().splitlines()[2:]:
 						data = [float(x) for x in line.split(',')]
@@ -804,7 +1128,8 @@ class ResistanceMeasurement:
 				self.ax.set_ylabel('Resistance [Ohms]')
 				self.ax.set_xlabel('Time [s]')
 
-				path = os.path.join(self.cwd, 'conti.out')
+				#path = os.path.join(self.cwd, 'conti.out')
+				path = self.filePath
 				with open(path, 'r') as file:
 					for line in file.read().splitlines()[2:]:
 						data = [float(x) for x in line.split(',')]
@@ -830,7 +1155,8 @@ class ResistanceMeasurement:
 				self.ax.set_xlabel('Voltage [V]')
 				self.ax.set_ylabel('Current [A]')
 
-				path = os.path.join(self.cwd, 'IVcurve.out')
+				#path = os.path.join(self.cwd, 'IVcurve.out')
+				path = self.filePath
 				with open(path, 'r') as file:
 					for line in file.read().splitlines()[2:]:
 						data = [float(x) for x in line.split(',')]
@@ -843,40 +1169,51 @@ class ResistanceMeasurement:
 				self.dataShowing = 'IVcurveData'
 				self.dataToSave = 'IVcurveData'
 
-	def _temperatureRun_takeMeas(self, event):
+	def _temperatureRun_takeMeas(self):
 		""" Initiates n measurements, updates data file and plot.
 		"""
-		# check if T is float:
-		if isinstance(self.T_sample, float):
-			# Number of measurements over which to average:
-			n = 15
-			U, R, U_source, I_source, R_source = self.URUIR(n=n, deltaMode=1)
-			# Resistance standard deviation:
-			DR = R.std()
-			try:
-				U = sum(U) / n
-				R = sum(R) / n
-				U_source = sum(U_sample) / n
-				I_source = sum(I_source) / n
-				R_source = sum(R_source) / n
-			except TypeError:
-				pass
-			print "Resistance at {} K = {} Ohms. Spread = {} %.".format(self.T_sample, R, abs(DR/R))
+		# Number of measurements over which to average:
+		n = 15
+		U, R, U_source, I_source, R_source = self.URUIR(n=n, deltaMode=1)
+		# Resistance standard deviation:
+		DR = R.std()
+		try:
+			U = sum(U) / n
+			R = sum(R) / n
+			U_source = sum(U_source) / n
+			I_source = sum(I_source) / n
+			R_source = sum(R_source) / n
+		except TypeError:
+			pass
+		print "Resistance at {} K = {} Ohms. Spread = {} %.".format(self.T_sample, R, abs(DR/R))
 
-			# When adding columns to the output data table, please
-			# adjust the data variable below as well as the
-			# self.DataHead array in the temperature(Auto)Run function.
-			data = np.array([self.T_sample, self.T_cryo, self.I, U, R, DR, U_source, I_source, R_source, time.time()])
-			self.latestDataPoint = data
+		# When adding columns to the output data table, please
+		# adjust the data variable below as well as the
+		# self.DataHead array in the temperature(Auto)Run function.
+		data = np.array([self.T_sample, self.T_cryo, self.I, U, R, DR, U_source, I_source, R_source, time.time()])
+		self.latestDataPoint = data
 
-			path = os.path.join(self.cwd, 'temp.out')
-			with open(path, 'a') as file:
-				data_string = self.delimiter.join(str(x) for x in data)
-				file.write(data_string+'\n')
+		self.Head = np.array([["T_sample", "T_cryo", "U_setpoint", "U_sample", "R_sample", "DR", "U_source",
+							   "I_source", "R_source", "t"],
+							  ["K", "K", "V", "V", "Ohms", "Ohms", "V", "A", "Ohms", "s"]])
 
-			self._temperatureRun_updatePlot(function='measure')
-		else:
-			print "Please enter valid Temperature!"
+		#path = os.path.join(self.cwd, 'temp.out')
+		path = self.filePath
+		if not os.path.isfile(path):
+			with open(path, 'w') as file:
+				for line in self.Head:
+					string = self.delimiter.join(str(x) for x in line)
+					file.write(string + '\n')
+		with open(path, 'a') as file:
+			data_string = self.delimiter.join(str(x) for x in data)
+			file.write(data_string+'\n')
+
+		#self._temperatureAutoRunNew_updatePlot(function='measure')
+		while self.plot_request_flag:
+			# wait for previous plot call to finish
+			time.sleep(0.01)
+		self.plot_request_function = 'measure'
+		self.plot_request_flag = 1
 
 	def _temperatureRun_continuousMeas(self, plot=0, n=1):
 		""" Continuously measures resistance until interrupted.
@@ -889,7 +1226,8 @@ class ResistanceMeasurement:
 		self.K2401.write(":OUTP ON")
 		t0 = time.time()
 
-		path = os.path.join(self.cwd, 'conti.out')
+		#path = os.path.join(self.cwd, 'conti.out')
+		path = self.filePath
 		with open(path, 'w') as file:
 			for line in self.ContiHead:
 				string = self.delimiter.join(str(x) for x in line)
@@ -923,7 +1261,12 @@ class ResistanceMeasurement:
 				file.write(data_string + '\n')
 
 			if plot:
-				self._temperatureRun_updatePlot(function='continuous')
+				#self._temperatureAutoRunNew_updatePlot(function='continuous')
+				while self.plot_request_flag:
+					# wait for previous plot call to finish
+					time.sleep(0.01)
+				self.plot_request_function = 'continuous'
+				self.plot_request_flag = 1
 			#self.K2401.write(":OUTP OFF")
 			#time.sleep(60)
 			#if t >= 5*60*60:
@@ -931,7 +1274,7 @@ class ResistanceMeasurement:
 
 		self.K2401.write(":OUTP OFF")
 
-	def _temperatureRun_startContinuous(self, event):
+	def _temperatureRun_startContinuous(self):
 		""" Callback function for the 'Continuous' button.
 		Starts new thread for continuous measurement function.
 		"""
@@ -940,34 +1283,41 @@ class ResistanceMeasurement:
 				self._temperatureAutoRun_updateStatus()
 			except AttributeError:
 				pass
-			plt.draw()
 			self.stopContinuousFlag = 1
 			self.continuousActive = 0
-			self.b7.color = 'lightgray'
-			self.b7.hovercolor = 'lightskyblue'
-			self.b7.label.set_text('Continuous')
+			self.contiVar.set('Start continuous')
 		elif not self.continuousActive:
-			try:
-				self._temperatureAutoRun_updateStatus('continuous measurement...', 1)
-			except AttributeError:
+			t = 'Overwrite log file?'
+			m = 'The log file already exists. Do you wish to overwrite it?'
+			if os.path.exists(self.filePath) and not tkMessageBox.askokcancel(t, m):
 				pass
-			plt.draw()
-			self.stopFlag = 0
-			self.stopContinuousFlag = 0
-			target = self._temperatureRun_continuousMeas
-			# plotting enabled: args = (1,)
-			title = 'Enable plotting?'
-			message = 'Would you like to enable live plotting? (Can cause instability with long measurements)'
-			plotbool = tkMessageBox.askyesno(title, message)
-			args = (plotbool,)
-			self.measurement = Thread(target=target, args=args)
-			self.measurement.start()
-			self.continuousActive = 1
-			self.b7.color = 'lightskyblue'
-			self.b7.hovercolor = 'lightgray'
-			self.b7.label.set_text('Stop')
-			self.dataShowing = ''
-			self.dataToSave = 'continuousData'
+			else:
+				try:
+					self._temperatureAutoRun_updateStatus('continuous measurement...', 1)
+				except AttributeError:
+					pass
+				#self._temperatureAutoRunNew_updatePlot(function='clear13')
+				while self.plot_request_flag:
+					# wait for previous plot call to finish
+					time.sleep(0.01)
+				self.plot_request_function = 'clear13'
+				self.plot_request_flag = 1
+
+				self.stopFlag = 0
+				self.stopContinuousFlag = 0
+				target = self._temperatureRun_continuousMeas
+				# plotting enabled: args = (1,)
+				plotbool = 1
+				#title = 'Enable plotting?'
+				#message = 'Would you like to enable live plotting? (Can cause instability with long measurements)'
+				#plotbool = tkMessageBox.askyesno(title, message)
+				args = (plotbool,)
+				self.measurement = Thread(target=target, args=args)
+				self.measurement.start()
+				self.continuousActive = 1
+				self.contiVar.set('Stop continuous')
+				self.dataShowing = ''
+				self.dataToSave = 'continuousData'
 
 	def _temperatureRun_updateT(self, event):
 		""" Textbox callback function to update Temperature. Checks only
@@ -1015,7 +1365,7 @@ class ResistanceMeasurement:
 		self.K2401.write(":SOUR:CURR:LEV {:.2e}".format(self.I))
 		self.t2.set_val(self.I)
 
-	def _temperatureRun_calibrate(self, event):
+	def _temperatureRun_calibrate(self):
 		""" Calls calibration function self.calibrate() upon button
 		press, updates textbox.
 		"""
@@ -1031,42 +1381,91 @@ class ResistanceMeasurement:
 			self.b0.hovercolor = 'lightskyblue'
 			self.b0.label.set_text('Calibrate I')
 		elif not self.calibrateActive:
-			# DIALOG NOCH VERBESSERN #######################################
-			if tkMessageBox.askyesno(title='I-V', message='I(V) instead of R(I)?'):
-				try:
-					self._temperatureAutoRun_updateStatus('calibrating...', 1)
-				except AttributeError:
-					pass
-				plt.draw()
-				self.stopFlag = 0
-				target = self.IVcurve
-				args = (10, 2, 0.0, 1)
-				self.calibration = Thread(target=target, args=args)
-				self.calibration.start()
-				self.calibrateActive = 1
-				self.b0.color = 'lightskyblue'
-				self.b0.hovercolor = 'lightgray'
-				self.b0.label.set_text('Stop')
-				self.dataShowing = ''
-				self.dataToSave = 'IVcurveData'
+			t = 'Overwrite log file?'
+			m = 'The log file already exists. Do you wish to overwrite it?'
+			if os.path.exists(self.filePath) and not tkMessageBox.askokcancel(t, m):
+				pass
 			else:
-				try:
-					self._temperatureAutoRun_updateStatus('calibrating...', 1)
-				except AttributeError:
-					pass
-				plt.draw()
+				#self._temperatureAutoRunNew_updatePlot(function='clear24')
+				while self.plot_request_flag:
+					# wait for previous plot call to finish
+					time.sleep(0.01)
+				self.plot_request_function = 'clear24'
+				self.plot_request_flag = 1
+
+				# DIALOG NOCH VERBESSERN #######################################
+				if tkMessageBox.askyesno(title='I-V', message='I(V) instead of R(I)?'):
+					try:
+						self._temperatureAutoRun_updateStatus('calibrating...', 1)
+					except AttributeError:
+						pass
+					plt.draw()
+					self.stopFlag = 0
+					target = self.IVcurve
+					args = (10, 2, 0.0, 1)
+					self.calibration = Thread(target=target, args=args)
+					self.calibration.start()
+					self.calibrateActive = 1
+					self.b0.color = 'lightskyblue'
+					self.b0.hovercolor = 'lightgray'
+					self.b0.label.set_text('Stop')
+					self.dataShowing = ''
+					self.dataToSave = 'IVcurveData'
+				else:
+					try:
+						self._temperatureAutoRun_updateStatus('calibrating...', 1)
+					except AttributeError:
+						pass
+					plt.draw()
+					self.stopFlag = 0
+					target = self.calibrate
+					args = (10, 2, 0.0, 1)
+					self.calibration = Thread(target=target, args=args)
+					self.calibration.start()
+					self.calibrateActive = 1
+					self.b0.color = 'lightskyblue'
+					self.b0.hovercolor = 'lightgray'
+					self.b0.label.set_text('Stop')
+					self.dataShowing = ''
+					self.dataToSave = 'calibrationData'
+					self.t2.set_val(self.I)
+
+	def _temperatureRun_calibrateNew(self):
+		""" Calls calibration function self.calibrate() upon button
+		press, updates textbox.
+		"""
+		if self.calibrateActive:
+			try:
+				self._temperatureAutoRun_updateStatus()
+			except AttributeError:
+				pass
+			plt.draw()
+			self.stopFlag = 1
+			self.calibrateActive = 0
+			self.caliVar.set('Calibrate')
+		elif not self.calibrateActive:
+			t = 'Overwrite log file?'
+			m = 'The log file already exists. Do you wish to overwrite it?'
+			if os.path.exists(self.filePath) and not tkMessageBox.askokcancel(t, m):
+				pass
+			else:
+				#self._temperatureAutoRunNew_updatePlot(function='clear24')
+				while self.plot_request_flag:
+					# wait for previous plot call to finish
+					time.sleep(0.01)
+				self.plot_request_function = 'clear24'
+				self.plot_request_flag = 1
+
+				self._temperatureAutoRun_updateStatus('calibrating...', 1)
 				self.stopFlag = 0
-				target = self.calibrate
+				target = self.calibrateNew
 				args = (10, 2, 0.0, 1)
 				self.calibration = Thread(target=target, args=args)
 				self.calibration.start()
 				self.calibrateActive = 1
-				self.b0.color = 'lightskyblue'
-				self.b0.hovercolor = 'lightgray'
-				self.b0.label.set_text('Stop')
+				self.caliVar.set('Stop calibration')
 				self.dataShowing = ''
 				self.dataToSave = 'calibrationData'
-				self.t2.set_val(self.I)
 
 	def _temperatureRun_saveFile(self, event):
 		""" Opens dialog to save DataTable to .csv file.
@@ -1092,7 +1491,7 @@ class ResistanceMeasurement:
 				dstn.write(src.read())
 			print "File saved to {}.".format(dstn_path)
 
-	def _temperatureRun_exit(self, event):
+	def _temperatureRun_exit(self):
 		""" Ask user confirmation to exit measurement, then remove
 		temporary data and/or close CryoConnector, as applicable.
 		"""
@@ -1108,7 +1507,10 @@ class ResistanceMeasurement:
 			except AttributeError:
 				pass
 
-			plt.close()
+			self.mainWindow.withdraw()
+			self.mainWindow.destroy()
+			self.exitFlag = 1
+			#plt.close()
 
 	def _temperatureRun_clearLast(self, event):
 		""" Ask user confirmation, then clear last entry in current
@@ -1220,7 +1622,7 @@ class ResistanceMeasurement:
 	def _addStage(self):
 		""" Callback function for add stage button, opens submenu.
 		"""
-		self.addStageWindow = tk.Tk()
+		self.addStageWindow = tk.Toplevel(master=self.configWindow)
 		self.addStageWindow.title('Add stage')
 
 		self.variable = tk.StringVar()
@@ -1293,7 +1695,7 @@ class ResistanceMeasurement:
 		np.savetxt(path, self.stageList, fmt='%s') #, fmt='%s'
 		self.configWindow.destroy()
 
-	def _temperatureAutoRun_configureRun(self, event):
+	def _temperatureAutoRun_configureRun(self):
 		""" Callback function for configure run button. Tries to load
 		previously saved configuration, opens submenu.
 		"""
@@ -1306,7 +1708,7 @@ class ResistanceMeasurement:
 				pass
 
 		# Configure Tkinter window.
-		self.configWindow = tk.Tk()
+		self.configWindow = tk.Toplevel(master=self.mainWindow)
 		self.configWindow.title('Configure measurement run')
 
 		# Configure treeview and initiate iid (item id) as 0.
@@ -1557,51 +1959,516 @@ class ResistanceMeasurement:
 		"""
 		if showcolor == 0:
 			# white
-			self.b9.color = 'white'
-			self.b9.hovercolor = 'white'
+			self.statusBar.config(bg='white')
 		elif showcolor == 1:
 			# green
-			self.b9.color = '#C8F7C8'
-			self.b9.hovercolor = '#C8F7C8'
+			self.statusBar.config(bg='#C8F7C8')
 		elif showcolor == 2:
 			# yellow
-			self.b9.color = '#F7F7C8'
-			self.b9.hovercolor = '#F7F7C8'
+			self.statusBar.config(bg='#F7F7C8')
 		elif showcolor == 3:
 			# orange
-			self.b9.color = '#F7D7B7'
-			self.b9.hovercolor = '#F7D7B7'
+			self.statusBar.config(bg='#F7D7B7')
 		elif showcolor == 4:
 			# red
-			self.b9.color = '#F7B7B7'
-			self.b9.hovercolor = '#F7B7B7'
+			self.statusBar.config(bg='#F7B7B7')
 
-		self.b9.label.set_text(message)
-		plt.draw()
+		self.statusMessage.set(message)
 
 	def _temperatureAutoRun_updateStopButton(self, setTo='OFF'):
 		""" Activates/deactivates the STOP button functionality,
 		returns 1/0 for the self.stopButtonActive status variable.
 		"""
 		if setTo == 'ON':
-			self.b8.color = '#E93F3F'
-			self.b8.hovercolor = 'lightcoral'
+			self.mb5.config(state='normal')
 			return 1
 		if setTo == 'OFF':
-			self.b8.color = '0.95'
-			self.b8.hovercolor = '0.95'
+			self.mb5.config(state='disabled')
 			return 0
 
-	def _temperatureAutoRun_start(self, event):
-		""" Callback function for the START button. starts the
+	def _temperatureAutoRun_start(self):
+		""" Callback function for the START button. Starts the
 		user-configured measurement run in a new thread.
 		"""
-		self._temperatureAutoRun_updateStatus('starting...', 1)
-		self.stopButtonActive = self._temperatureAutoRun_updateStopButton('ON')
-		plt.draw()
-		self.stopFlag = 0
-		self.measurement = Thread(target=self._temperatureAutoRun_takeMeas)
-		self.measurement.start()
+		t = 'Overwrite log file?'
+		m = 'The log file already exists. Do you wish to overwrite it?'
+		if os.path.exists(self.filePath) and not tkMessageBox.askokcancel(t, m):
+			pass
+		else:
+			#self._temperatureAutoRunNew_updatePlot(function='clear13')
+			while self.plot_request_flag:
+				# wait for previous plot call to finish
+				time.sleep(0.01)
+			self.plot_request_function = 'clear13'
+			self.plot_request_flag = 1
+
+			self._temperatureAutoRun_updateStatus('starting...', 1)
+			self.stopButtonActive = self._temperatureAutoRun_updateStopButton('ON')
+			self.stopFlag = 0
+			self.measurement = Thread(target=self._temperatureAutoRun_takeMeas)
+			self.measurement.start()
+
+	def _temperatureAutoRun_rampDialogCancel(self):
+		""" Cancel button callback function"""
+		self.rampDialog.destroy()
+		self.rampDialogOutput = ('', '')
+
+	def _temperatureAutoRun_rampDialogOk(self):
+		""" Ok button callback function"""
+		self.rampDialogOutput = (self.rampEntry.get(), self.tempEntry.get())
+		self.rampDialog.destroy()
+
+	def _temperatureAutoRun_rampDialog(self):
+		"""
+		Dialog to input ramp rate and temperature.
+		:return: (rampRate, temp) or -1 if cancelled
+		"""
+		self.rampDialogOutput = ('', '')
+		pad = 5
+		self.rampDialog = tk.Toplevel(self.root)
+		self.rampDialog.title('Input ramp parameters')
+		self.rampDialog.resizable(0, 0)
+		mainFrame = tk.Frame(self.rampDialog)
+		mainFrame.pack(padx=pad, pady=pad)
+		self.rampLabel = tk.Label(mainFrame, text='Ramp rate in K/min')
+		self.rampLabel.grid(row=0, column=0, padx=pad, pady=pad, sticky='W')
+		self.tempLabel = tk.Label(mainFrame, text='Temperature in K')
+		self.tempLabel.grid(row=0, column=1, padx=pad, pady=pad, sticky='W')
+		self.rampEntry = tk.Entry(mainFrame)
+		self.rampEntry.grid(row=1, column=0, padx=pad, pady=pad)
+		self.tempEntry = tk.Entry(mainFrame)
+		self.tempEntry.grid(row=1, column=1, padx=pad, pady=pad)
+		self.cancel = tk.Button(mainFrame,
+								text='cancel',
+								command=self._temperatureAutoRun_rampDialogCancel)
+		self.cancel.grid(row=2, column=0, padx=pad, pady=pad, sticky='NSW')
+		self.ok = tk.Button(mainFrame,
+							text='ok',
+							command=self._temperatureAutoRun_rampDialogOk)
+		self.ok.grid(row=2, column=1, padx=pad, pady=pad, sticky='NES')
+
+		self.rampDialog.wait_window()
+		return self.rampDialogOutput
+
+	def _temperatureAutoRun_ramp(self):
+		"""
+		Callback function for the Ramp button. Asks user to input a set-
+		point temperature and ramp rate, sends ramp command to cryo.
+		"""
+		rampParameters = self._temperatureAutoRun_rampDialog()
+		if rampParameters != ('', ''):
+			self.cryostat.ramp(*rampParameters)
+
+	def _temperatureAutoRunNew_changeFilePath(self):
+		"""
+		Callback function for the Name log file button.
+		"""
+		ftypes = [('CSV files', 'csv'), ('All files', '*')]
+		dstn_path = tkFileDialog.asksaveasfilename(filetypes=ftypes,
+												   defaultextension='.csv')
+		if dstn_path:
+			self.filePath = dstn_path
+		self.filePathVar.set(self.filePath)
+
+	def _temperatureAutoRunNew_updatePlot(self, function='measure'):
+		"""
+		Updates the different plots with latest data, depending on which
+		function ('measure', 'continuous', 'IVcurve or 'calibrate') is
+		active.	Use function 'clear13' to clear plots on the left, and
+		'clear24' to clear plots on the right.
+		"""
+
+		figureSize = (4.6, 3)
+		pad = 10
+		tight = 0
+		left = 0.20
+		bottom = 0.18
+		right = 1 + 0.03 - left
+		top = None
+		figcolor = '#FAFAFA'
+		axcolor = '#FAFAFA'
+
+		if function == 'clear13':
+
+			self.axes1.clear()
+			self.axes2.clear()
+			self.axes4.clear()
+
+			# Figure one - R(t), T(t)  - - - - - - - - - - - - - - - - -
+			self.axes1.set_ylabel('Resistance [Ohms]')
+			self.axes1.set_xlabel('Time [s]')
+			self.axes1.grid()
+
+			self.axes2.set_ylabel('Temperature [K]')
+			self.axes2.yaxis.label.set_color('tab:blue')
+
+			# Figure three - R(T)  - - - - - - - - - - - - - - - - - - - - -
+			self.axes4.set_ylabel('Resistance [Ohms]')
+			self.axes4.set_xlabel('Temperature [K]')
+			self.axes4.grid()
+
+			# Update canvases  - - - - - - - - - - - - - - - - - - - - -
+			self.canvas1.draw_idle()
+			#self.toolbar1.update()
+			self.canvas3.draw_idle()
+
+		if function == 'clear24':
+
+			self.axes3.clear()
+			self.axes5.clear()
+			self.axes6.clear()
+
+			# Figure two - I(V) curve  - - - - - - - - - - - - - - - - - - -
+			self.axes3.set_ylabel('Current [A]')
+			self.axes3.yaxis.label.set_color('tab:red')
+			self.axes3.set_xlabel('Voltage [V]')
+			self.axes3.set_xscale('symlog', linthreshx=2*self.U_min)
+			self.axes3.set_yscale('symlog', linthreshy=200*self.I_min)
+			self.axes3.grid()
+			self.axes3.xaxis.grid(which='minor')  # minor grid on too
+			self.axes3.yaxis.grid(which='minor')  # minor grid on too
+			#plt.locator_params(axis='x', numticks=7)
+			#plt.locator_params(axis='y', numticks=7)
+
+			# Figure four - R(I), dR(I)  - - - - - - - - - - - - - - - - - -
+			self.axes5.set_ylabel('Resistance [Ohms]')
+			self.axes5.set_xlabel('Current [A]')
+			self.axes5.set_xscale('symlog', linthreshx=200*self.I_min)
+			self.axes5.grid()
+			self.axes5.xaxis.grid(which='minor')  # minor grid on too
+			self.axes5.yaxis.grid(which='minor')  # minor grid on too
+			#plt.locator_params(axis='x', numticks=7)
+			#plt.locator_params(axis='y', numticks=7)
+
+			self.axes6.set_ylabel('Statistical uncertainty [%]')
+			self.axes6.yaxis.label.set_color('tab:brown')
+
+			# Update canvases  - - - - - - - - - - - - - - - - - - - - -
+			self.canvas2.draw_idle()
+			#self.toolbar2.update()
+			self.canvas4.draw_idle()
+
+		if function == 'measure' or function == 'continuous':
+
+			xdata = self.latestDataPoint[9]
+			ydata = self.latestDataPoint[4]
+			self.axes1.plot(xdata, ydata, c='black', marker='o')
+
+			ydata = self.latestDataPoint[0]
+			self.axes2.plot(xdata, ydata, c='tab:blue', marker='o')
+
+			xdata = self.latestDataPoint[0]
+			ydata = self.latestDataPoint[4]
+			self.axes4.plot(xdata, ydata, c='black', marker='o')
+
+			self.canvas1.draw_idle()
+			#self.toolbar1.update()
+			self.canvas3.draw_idle()
+
+		if function == 'IVcurve':
+
+			xdata = self.latestDataPoint[0]
+			ydata = self.latestDataPoint[1]
+			self.axes3.plot(xdata, ydata, c='tab:red', marker='o')
+
+			self.canvas2.draw_idle()
+
+		elif function == 'calibrate':
+
+			xdata = self.latestDataPoint[0]
+			ydata = self.latestDataPoint[1]
+			self.axes5.plot(xdata, ydata, c='black', marker='o')
+
+			ydata = self.latestDataPoint[2]
+			self.axes6.plot(xdata, ydata, c='tab:brown', marker='o')
+
+			self.canvas4.draw_idle()
+
+	def _temperatureAutoRunNew_configureSettingsCancel(self):
+		"""
+		Callback function for the cancel button, closes sub-menu window.
+		"""
+		self.settingsWindow.destroy()
+
+	def _temperatureAutoRunNew_configureSettingsOk(self):
+		"""
+		Callback function for the Ok button, checks if user inputs are
+		floats, updates corresponding values, closes window.
+		"""
+		self.e0.config({'background': 'white'})
+		if not self.use_cryo:
+			self.e12.config({'background': 'white'})
+		self.e42.config({'background': 'white'})
+		self.e44.config({'background': 'white'})
+		self.e46.config({'background': 'white'})
+		self.e52.config({'background': 'white'})
+		self.e54.config({'background': 'white'})
+		try:
+			self.I_userInput = float(self.I_userInput_var.get())
+			I_is_number = True
+			I_in_limits = self.I_min <= self.I_userInput <= self.I_max
+		except ValueError:
+			self.e0.config({'background': '#ffc0cb'})
+			I_is_number = False
+			I_in_limits = False
+
+		if not self.use_cryo:
+			try:
+				self.T_userInput = float(self.T_userInput_var.get())
+				T_is_number = True
+				T_in_limits = 0 <= self.T_userInput
+			except ValueError:
+				self.e12.config({'background': '#ffc0cb'})
+				T_is_number = False
+				T_in_limits = False
+		else:
+			T_is_number = True
+			T_in_limits = True
+
+		try:
+			self.A_userInput = float(self.A_var.get())
+			A_is_number = True
+		except ValueError:
+			self.e42.config({'background': '#ffc0cb'})
+			A_is_number = False
+
+		try:
+			self.B_userInput = float(self.B_var.get())
+			B_is_number = True
+		except ValueError:
+			self.e44.config({'background': '#ffc0cb'})
+			B_is_number = False
+
+		try:
+			self.C_userInput = float(self.C_var.get())
+			C_is_number = True
+		except ValueError:
+			self.e46.config({'background': '#ffc0cb'})
+			C_is_number = False
+
+		try:
+			self.U_min_userInput = float(self.U_min_var.get())
+			U_min_is_number = True
+		except ValueError:
+			self.e52.config({'background': '#ffc0cb'})
+			U_min_is_number = False
+
+		try:
+			self.U_max_userInput = float(self.U_max_var.get())
+			U_max_is_number = True
+			if U_max_is_number:
+				U_max_in_limits = self.U_max_userInput > self.U_min_userInput
+			else:
+				U_max_in_limits = False
+		except ValueError:
+			self.e54.config({'background': '#ffc0cb'})
+			U_max_is_number = False
+			U_max_in_limits = False
+
+		if I_is_number and T_is_number and A_is_number and B_is_number and \
+			C_is_number and U_min_is_number and U_max_is_number:
+			if not (I_in_limits and T_in_limits):
+				title = 'Inputs out of limits'
+				message = 'Inputs were out of limits. The following changes ' \
+						  'have been made:\n\n'
+				if self.I_userInput < self.I_min:
+					self.I_userInput = self.I_min
+					self.I_userInput_var.set(str(self.I_min))
+					message += 'I_setpoint to I_min ({} A)\n'.format(self.I_min)
+				if self.I_userInput > self.I_max:
+					self.I_userInput = self.I_max
+					self.I_userInput_var.set(str(self.I_max))
+					message += 'I_setpoint to I_max ({} A)\n'.format(self.I_max)
+				if (not self.use_cryo) and self.T_userInput < 0.0:
+					self.T_userInput = 0.0
+					self.T_userInput_var.set('0')
+					message += 'T to absolute zero (0 K)\n'.format(self.I_min)
+				tkMessageBox.showinfo(title=title, message=message)
+			self.I = self.I_userInput
+			if not self.use_cryo:
+				self.T_sample = self.T_userInput
+				self.T_cryo = self.T_userInput
+			self.A = self.A_userInput
+			self.B = self.B_userInput
+			self.C = self.C_userInput
+			self.U_min = self.U_min_userInput
+			self.U_max = self.U_max_userInput
+			if self.use_cryo:
+				self.calibrationCurve_TA_to_Tsample = c1 = \
+					self.calibrationCurve_var_TA_to_Tsample.get()
+				self.calibrationCurve_Tsample_to_TA = c2 = \
+					self.calibrationCurve_var_Tsample_to_TA.get()
+				self.cryostat.setCalibrationCurves(c1, c2)
+			self.settingsWindow.destroy()
+		else:
+			title = 'Invalid inputs'
+			message = 'Some of the fields contain invalid (non-float) entries.' \
+					  'Please review your inputs.'
+			tkMessageBox.showerror(title=title, message=message)
+
+	def _temperatureAutoRunNew_configureSettings(self):
+		"""
+		Callback function for the Configure settings button, opens sub-
+		menu.
+		"""
+		self.settingsWindow = tk.Toplevel(master=self.mainWindow)
+		self.settingsWindow.geometry('490x450')
+		self.settingsWindow.resizable(0, 0)
+		self.settingsWindow.title('Configure measurement settings')
+		pad = 5
+		settingsFrame = tk.Frame(master=self.settingsWindow)
+		#settingsFrame.grid(padx=pad, pady=pad)
+		settingsFrame.pack(padx=pad, pady=pad)
+
+		text = 'Change current setpoint [A]:'
+		l0 = tk.Label(master=settingsFrame, text=text)
+		l0.grid(row=1, column=1, padx=5, pady=5, sticky='NESW')
+
+		subFrame0 = tk.Frame(master=settingsFrame)
+		subFrame0.grid(row=2, column=1, padx=5, pady=5)
+
+		text = 'I_setpoint = '
+		l01 = tk.Label(master=subFrame0, text=text)
+		l01.grid(row=0, column=0)
+
+		self.I_userInput_var = tk.StringVar()
+		self.I_userInput_var.set(np.format_float_scientific(self.I))
+		self.e0 = tk.Entry(master=subFrame0, exportselection=0, width=10,
+						   textvariable=self.I_userInput_var)
+		self.e0.grid(row=0, column=1)
+
+		if not self.use_cryo:
+			text = 'Enter temperature [K]:'
+			l1 = tk.Label(master=settingsFrame, text=text)
+			l1.grid(row=3, column=1, padx=5, pady=5,
+					sticky='NESW')
+
+			subFrame1 = tk.Frame(master=settingsFrame)
+			subFrame1.grid(row=4, column=1, padx=5, pady=5)
+
+			text = 'T = '
+			l11 = tk.Label(master=subFrame1, text=text)
+			l11.grid(row=0, column=0)
+
+			self.T_userInput_var = tk.StringVar()
+			self.T_userInput_var.set(str(self.T_cryo))
+			self.e12 = tk.Entry(master=subFrame1, exportselection=0,
+						  		textvariable=self.T_userInput_var)
+			self.e12.grid(row=0, column=1)
+
+		if self.use_cryo:
+			curves = [file for file in os.listdir('calibration_curves')]
+			current_curves = self.cryostat.getCalibrationCurves()
+
+			text = 'Choose temperature calibration curve (cryo -> sample):'
+			l2 = tk.Label(master=settingsFrame, text=text)
+			l2.grid(row=5, column=1, padx=5, pady=5,
+					sticky='NESW')
+
+			self.calibrationCurve_var_TA_to_Tsample = tk.StringVar()
+			current = os.path.basename(current_curves[0])
+			self.calibrationCurve_var_TA_to_Tsample.set(current)
+			o2 = tk.OptionMenu(settingsFrame,
+							   self.calibrationCurve_var_TA_to_Tsample,
+							   *curves)
+			o2.grid(row=6, column=1, padx=5, pady=5,
+					sticky='NESW')
+
+			text = 'Choose temperature calibration curve (sample -> cryo):'
+			l3 = tk.Label(master=settingsFrame, text=text)
+			l3.grid(row=7, column=1, padx=5, pady=5,
+					sticky='NESW')
+
+			self.calibrationCurve_var_Tsample_to_TA = tk.StringVar()
+			current = os.path.basename(current_curves[1])
+			self.calibrationCurve_var_Tsample_to_TA.set(current)
+			o3 = tk.OptionMenu(settingsFrame,
+							   self.calibrationCurve_var_Tsample_to_TA,
+							   *curves)
+			o3.grid(row=8, column=1, padx=5, pady=5,
+					sticky='NESW')
+
+		text = 'Change merit function weighting factors for current\n' \
+			   'setpoint calibration:'
+		l4 = tk.Label(master=settingsFrame, text=text)
+		l4.grid(row=11, column=1, padx=5, pady=5)
+
+		subFrame2 = tk.Frame(master=settingsFrame)
+		subFrame2.grid(row=12, column=1, padx=5, pady=5)
+
+		text = 'A = '
+		l41 = tk.Label(master=subFrame2, text=text)
+		l41.grid(row=0, column=0)
+
+		self.A_var = tk.StringVar()
+		self.A_var.set(str(self.A))
+		self.e42 = tk.Entry(master=subFrame2, exportselection=0, width=10,
+					   		textvariable=self.A_var)
+		self.e42.grid(row=0, column=1)
+
+		text = ', B = '
+		l43 = tk.Label(master=subFrame2, text=text)
+		l43.grid(row=0, column=2)
+
+		self.B_var = tk.StringVar()
+		self.B_var.set(str(self.B))
+		self.e44 = tk.Entry(master=subFrame2, exportselection=0, width=10,
+					   		textvariable=self.B_var)
+		self.e44.grid(row=0, column=3)
+
+		text = ', C = '
+		l45 = tk.Label(master=subFrame2, text=text)
+		l45.grid(row=0, column=4)
+
+		self.C_var = tk.StringVar()
+		self.C_var.set(str(self.C))
+		self.e46 = tk.Entry(master=subFrame2, exportselection=0, width=10,
+							textvariable=self.C_var)
+		self.e46.grid(row=0, column=5)
+
+		text = 'Change voltage range for current setpoint calibration [V]:'
+		l5 = tk.Label(master=settingsFrame, text=text)
+		l5.grid(row=13, column=1, padx=5, pady=5)
+
+		subFrame3 = tk.Frame(master=settingsFrame)
+		subFrame3.grid(row=14, column=1, padx=5, pady=5)
+
+		text = 'U_min = '
+		l51 = tk.Label(master=subFrame3, text=text)
+		l51.grid(row=0, column=0)
+
+		self.U_min_var = tk.StringVar()
+		self.U_min_var.set(str(self.U_min))
+		self.e52 = tk.Entry(master=subFrame3, exportselection=0, width=10,
+						    textvariable=self.U_min_var)
+		self.e52.grid(row=0, column=1)
+
+		text = ', U_max = '
+		l53 = tk.Label(master=subFrame3, text=text)
+		l53.grid(row=0, column=2)
+
+		self.U_max_var = tk.StringVar()
+		self.U_max_var.set(str(self.U_max))
+		self.e54 = tk.Entry(master=subFrame3, exportselection=0, width=10,
+							textvariable=self.U_max_var)
+		self.e54.grid(row=0, column=3)
+
+		text = 'Configure automated temperature run...'
+		command = self._temperatureAutoRun_configureRun
+		b6 = tk.Button(master=settingsFrame, text=text, command=command)
+		b6.grid(row=16, column=1, padx=5, pady=5, sticky='NESW')
+
+		text = 'Cancel'
+		command = self._temperatureAutoRunNew_configureSettingsCancel
+		b71 = tk.Button(master=settingsFrame, text=text, command=command,
+						width=8)
+		b71.grid(row=17, column=0, padx=5, pady=5, sticky='NESW')
+
+		text = 'OK'
+		command = self._temperatureAutoRunNew_configureSettingsOk
+		b72 = tk.Button(master=settingsFrame, text=text, command=command,
+						width=8)
+		b72.grid(row=17, column=2, padx=5, pady=5, sticky='NESW')
 
 	def temperatureRun(self, n=20):
 		""" This function initiates a manual resistance over temperature
@@ -1810,6 +2677,318 @@ class ResistanceMeasurement:
 			except WindowsError:
 				pass
 
+	def temperatureAutoRunNew(self, n=20):
+		""" This function scans the resistance of a connected sample
+		fully automatically by incorporating remote control of supported
+		cryostats via the Cryostat.py module.
+		"""
+		self.DataHead = np.array([["T_sample", "T_cryo", "I_setpoint", "U_sample", "R_sample", "DR", "U_source", "I_source", "R_source", "t"],
+							 ["K", "K", "A", "V", "Ohms", "Ohms", "V", "A", "Ohms", "s"]])
+
+		date = time.strftime('%Y%m%d', time.gmtime(time.time()))
+		baseName = date + '.csv'
+		self.fileBasePath = os.path.join(self.cwd, baseName)
+		self.filePath = self.fileBasePath
+
+		# GUI  - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+		# Font options for embedded matplotlib canvases
+		font = {'family': 'sans-serif',
+				'weight': 'normal',
+				'size': 8}
+
+		plt.rc('font', **font)
+
+		self.mainWindow = tk.Toplevel()
+		self.mainWindow.withdraw()
+		self.mainWindow.resizable(0, 0)
+		self.mainWindow.title('Resistance Measurement')
+
+		figureSize = (4.6, 3)
+		pad = 10
+		tight = 0
+		left = 0.20
+		bottom = 0.18
+		right = 1 + 0.03 - left
+		top = None
+		figcolor = '#FAFAFA'
+		axcolor = '#FAFAFA'
+
+		self.mainFrame = tk.Frame(self.mainWindow)
+		self.mainFrame.pack(padx=pad, pady=pad)
+
+		# Figure one - R(t), T(t)  - - - - - - - - - - - - - - - - - - -
+		self.figure1 = Figure(figureSize)
+		self.axes1 = self.figure1.add_subplot(111)
+		# self.axes1.set_title('Current measurement run:')
+		self.axes1.set_ylabel('Resistance [Ohms]')
+		self.axes1.set_xlabel('Time [s]')
+		if self.use_cryo:
+			self.axes1.set_ylim(0, 1000)
+			self.axes1.set_xlim(0, 1)
+		self.axes1.grid()
+
+		self.axes2 = self.axes1.twinx()
+		self.axes2.set_ylabel('Temperature [K]')
+		self.axes2.yaxis.label.set_color('tab:blue')
+		if self.use_cryo:
+			self.axes2.set_ylim(0, 300)
+
+		if tight:
+			self.figure1.tight_layout()
+		else:
+			self.figure1.subplots_adjust(left=left,
+										 bottom=bottom,
+										 right=right,
+										 top=top)
+
+		self.figure1.patch.set(facecolor=figcolor)
+		self.axes1.patch.set(facecolor=axcolor)
+
+		# create canvas as matplotlib drawing area
+		self.frame1 = tk.Frame(self.mainFrame, borderwidth=2, relief='sunken')
+		self.canvas1 = FigureCanvasTkAgg(self.figure1, master=self.frame1)
+		self.canvas1.draw()
+		with warnings.catch_warnings():
+			warnings.filterwarnings('ignore')
+			self.toolbar1 = NavigationToolbar2TkAgg(self.canvas1, self.frame1)
+			self.toolbar1.update()
+		widget1 = self.canvas1.get_tk_widget()
+		widget1.pack()
+		self.frame1.grid(row=0, column=0, columnspan=2, padx=pad, pady=pad)
+
+		# Figure two - I(V) curve  - - - - - - - - - - - - - - - - - - -
+		self.figure2 = Figure(figureSize)
+		self.axes3 = self.figure2.add_subplot(111)
+		self.axes3.set_ylabel('Current [A]')
+		self.axes3.yaxis.label.set_color('tab:red')
+		self.axes3.set_xlabel('Voltage [V]')
+		self.axes3.set_xscale('symlog', linthreshx=2*self.U_min)
+		self.axes3.set_yscale('symlog', linthreshy=200*self.I_min)
+		self.axes3.set_ylim(-1, 1)
+		self.axes3.set_xlim(-1, 1)
+		self.axes3.grid()
+		self.axes3.xaxis.grid(which='minor')  # minor grid on too
+		self.axes3.yaxis.grid(which='minor')  # minor grid on too
+
+		if tight:
+			self.figure2.tight_layout()
+		else:
+			self.figure2.subplots_adjust(left=left,
+										 bottom=bottom,
+										 right=right,
+										 top=top)
+
+		self.figure2.patch.set(facecolor=figcolor)
+		self.axes3.patch.set(facecolor=axcolor)
+
+		# create canvas as matplotlib drawing area
+		self.frame2 = tk.Frame(self.mainFrame, borderwidth=2, relief='sunken')
+		self.canvas2 = FigureCanvasTkAgg(self.figure2, master=self.frame2)
+		self.canvas2.draw()
+		with warnings.catch_warnings():
+			warnings.filterwarnings('ignore')
+			self.toolbar2 = NavigationToolbar2TkAgg(self.canvas2, self.frame2)
+			self.toolbar2.update()
+		widget2 = self.canvas2.get_tk_widget()
+		widget2.pack()
+		self.frame2.grid(row=0, column=2, columnspan=2, padx=pad, pady=pad)
+
+		# Figure three - R(T)  - - - - - - - - - - - - - - - - - - - - -
+		self.figure3 = Figure(figureSize)
+		self.axes4 = self.figure3.add_subplot(111)
+		self.axes4.set_ylabel('Resistance [Ohms]')
+		self.axes4.set_xlabel('Temperature [K]')
+		if self.use_cryo:
+			self.axes4.set_ylim(0, 1000)
+			self.axes4.set_xlim(0, 300)
+		self.axes4.grid()
+
+		if tight:
+			self.figure3.tight_layout()
+		else:
+			self.figure3.subplots_adjust(left=left,
+										 bottom=bottom,
+										 right=right,
+										 top=top)
+
+		self.figure3.patch.set(facecolor=figcolor)
+		self.axes4.patch.set(facecolor=axcolor)
+
+		# create canvas as matplotlib drawing area
+		self.frame3 = tk.Frame(self.mainFrame, borderwidth=2, relief='sunken')
+		self.canvas3 = FigureCanvasTkAgg(self.figure3, master=self.frame3)
+		self.canvas3.draw()
+		with warnings.catch_warnings():
+			warnings.filterwarnings('ignore')
+			self.toolbar3 = NavigationToolbar2TkAgg(self.canvas3, self.frame3)
+			self.toolbar3.update()
+		widget3 = self.canvas3.get_tk_widget()
+		widget3.pack()
+		self.frame3.grid(row=1, column=0, columnspan=2, padx=pad, pady=pad)
+
+		# Figure four - R(I), dR(I)  - - - - - - - - - - - - - - - - - -
+		self.figure4 = Figure(figureSize)
+		self.axes5 = self.figure4.add_subplot(111)
+		self.axes5.set_ylabel('Resistance [Ohms]')
+		self.axes5.set_xlabel('Current [A]')
+		self.axes5.set_xscale('symlog', linthreshx=200*self.I_min)
+		self.axes5.set_ylim(0, 1000)
+		self.axes5.set_xlim(-1, 1)
+		self.axes5.grid()
+		self.axes5.xaxis.grid(which='minor')  # minor grid on too
+		self.axes5.yaxis.grid(which='minor')  # minor grid on too
+
+		self.axes6 = self.axes5.twinx()
+		self.axes6.set_ylabel('Statistical uncertainty [%]')
+		self.axes6.yaxis.label.set_color('tab:brown')
+		self.axes6.set_ylim(0, 100)
+
+		if tight:
+			self.figure4.tight_layout()
+		else:
+			self.figure4.subplots_adjust(left=left,
+										 bottom=bottom,
+										 right=right,
+										 top=top)
+
+		self.figure4.patch.set(facecolor=figcolor)
+		self.axes5.patch.set(facecolor=axcolor)
+
+		# create canvas as matplotlib drawing area
+		self.frame4 = tk.Frame(self.mainFrame, borderwidth=2, relief='sunken')
+		self.canvas4 = FigureCanvasTkAgg(self.figure4, master=self.frame4)
+		self.canvas4.draw()
+		with warnings.catch_warnings():
+			warnings.filterwarnings('ignore')
+			self.toolbar4 = NavigationToolbar2TkAgg(self.canvas4, self.frame4)
+			self.toolbar4.update()
+		widget4 = self.canvas4.get_tk_widget()
+		widget4.pack()
+		self.frame4.grid(row=1, column=2, columnspan=2, padx=pad, pady=pad)
+
+		# Buttons  - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+		text = 'Configure settings'
+		command = self._temperatureAutoRunNew_configureSettings
+		mb0 = tk.Button(self.mainFrame, text=text, command=command)
+		mb0.grid(row=2, column=0, padx=pad, pady=pad, sticky='NESW')
+
+		text = 'Calibrate'
+		self.caliVar = tk.StringVar()
+		self.caliVar.set(text)
+		command = self._temperatureRun_calibrateNew
+		self.mb1 = tk.Button(self.mainFrame,
+							 textvariable=self.caliVar,
+							 command=command)
+		self.mb1.grid(row=2, column=1, padx=pad, pady=pad, sticky='NESW')
+
+		text = 'Start continuous'
+		self.contiVar = tk.StringVar()
+		self.contiVar.set(text)
+		command = self._temperatureRun_startContinuous
+		self.mb2 = tk.Button(self.mainFrame,
+							 textvariable=self.contiVar,
+							 command=command)
+		self.mb2.grid(row=2, column=2, padx=pad, pady=pad, sticky='NESW')
+
+		text = 'Ramp'
+		command = self._temperatureAutoRun_ramp
+		state = 'disabled'
+		if self.use_cryo:
+			state = 'normal'
+		mb3 = tk.Button(self.mainFrame, text=text, command=command, state=state)
+		mb3.grid(row=2, column=3, padx=pad, pady=pad, sticky='NESW')
+
+		if self.use_cryo:
+			text = 'Start configured run'
+			command = self._temperatureAutoRun_start
+		else:
+			text = 'Take measurement'
+			command = self._temperatureRun_takeMeas
+		mb4 = tk.Button(self.mainFrame, text=text, command=command)
+		mb4.grid(row=3, column=0, padx=pad, pady=pad, sticky='NESW')
+
+		text = 'STOP'
+		command = self.stop
+		self.mb5 = tk.Button(self.mainFrame,
+							 text=text,
+							 command=command,
+							 state='disabled')
+		self.mb5.grid(row=3, column=3, padx=pad, pady=pad, sticky='NESW')
+
+		text = 'Name log file'
+		command = self._temperatureAutoRunNew_changeFilePath
+		mb6 = tk.Button(self.mainFrame, text=text, command=command)
+		mb6.grid(row=4, column=0, padx=pad, pady=pad, sticky='NESW')
+
+		text = 'Exit'
+		command = self._temperatureRun_exit
+		mb7 = tk.Button(self.mainFrame, text=text, command=command)
+		mb7.grid(row=4, column=3, padx=pad, pady=pad, sticky='NESW')
+
+		#  Labels/messages - - - - - - - - - - - - - - - - - - - - - - -
+
+		self.statusMessage = tk.StringVar()
+		self.statusMessage.set('ready...')
+		self.statusBar = tk.Label(self.mainFrame,
+								  textvariable=self.statusMessage,
+								  bg='white',
+								  borderwidth=1,
+								  relief='sunken')
+		self.statusBar.grid(row=3,
+							column=1,
+							columnspan=2,
+							padx=pad,
+							pady=pad,
+							sticky='NESW')
+
+		self.filePathVar = tk.StringVar()
+		self.filePathVar.set(self.fileBasePath)
+		self.filePathBar = tk.Label(self.mainFrame,
+									textvariable=self.filePathVar,
+									borderwidth=1,
+									relief='sunken')
+		self.filePathBar.grid(row=4,
+							  column=1,
+							  columnspan=2,
+							  padx=pad,
+							  pady=pad,
+							  sticky='NESW')
+
+		#  - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+		self.mainWindow.protocol('WM_DELETE_WINDOW', self._temperatureRun_exit)
+		self.mainWindow.deiconify()
+
+		# The following keeps the tkinter window updating (basically
+		# tk.mainloop()) but also continually checks if the diagrams
+		# should be updated, which needs to be handled in the main
+		# thread as the program is unstable otherwise (matplotlib is not
+		# thread-safe), or if the calibration finished prompt should be
+		# displayed, which also does not work from a separate thread.
+		while not self.exitFlag:
+			if self.plot_request_flag:
+				function = self.plot_request_function
+				self._temperatureAutoRunNew_updatePlot(function=function)
+				self.plot_request_flag = 0
+
+			if self.calibrationFinishedFlag:
+				title = 'Calibration finished'
+				part1 = 'The suggested current setpoint is I = '
+				part2 = np.format_float_scientific(self.I_opt, 2)
+				part3 = ' A. Do you wish to apply this setting?'
+				message = part1 + part2 + part3
+				if tkMessageBox.askyesno(parent=self.mainWindow,
+										 title=title,
+										 message=message):
+					self.I = self.I_opt
+				self.calibrationFinishedFlag = 0
+
+			self.mainWindow.update_idletasks()
+			self.mainWindow.update()
+
+		self.root.destroy()
 
 def main():
 

@@ -28,7 +28,7 @@ class Cryostat(object):
 		self.testMode = testMode
 
 		# Please include any cryostat/controller that you add in the lists below.
-		self.supported_manufacturers = ['Oxford', 'Lake Shore']
+		self.supported_manufacturers = ['Oxford', 'Lake Shore'] # no duplicates
 		self.supported_devices = ['N-HeliX', 'MODEL336']
 
 		# The index is used to decide which code to execute, depending on the type of cryostat device to connect to.
@@ -53,9 +53,23 @@ class Cryostat(object):
 				raise Exception('The provided device type is not in the list of supported cryostats.\nPlease mind the ' \
 								 'spelling. The module currently supports: {}'.format(self.supported_devices))
 
+		# Define the path to the temperature sensor calibration curves. Try loading previously used files, or if none
+		# are found, set to default. (Only used for MODEL336)
+		default = 'calibration_curves/one-to-one.csv'
+		try:
+			paths = np.genfromtxt('last_used_curves.out', dtype='str')
+			p1 = paths[0]
+			p2 = paths[1]
+			self.TA_to_Tsample_calibration_curve = p1
+			self.Tsample_to_TA_calibration_curve = p2
+		except IOError:
+			self.TA_to_Tsample_calibration_curve = default
+			self.Tsample_to_TA_calibration_curve = default
+
 		# N-HeliX
 		if self.index == 0:
-			self.nhelix = CryoConnectorAPI(self.CCWorkingFolder, self.port)
+			if device and port:
+				self.nhelix = CryoConnectorAPI(self.CCWorkingFolder, self.port)
 
 		# MODEL336
 		if self.index == 1:
@@ -90,7 +104,10 @@ class Cryostat(object):
 	# Choose cryostat dialog - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
 	def _okButton(self):
-		""" Callback function which initiates selection of cryostat from the manufacturer chosen in chooseCryo. """
+		"""
+		Callback function which initiates selection of cryostat from the
+		manufacturer chosen in chooseCryo.
+		"""
 		self.selectManufacturerWindow.destroy()
 
 		# Oxford temperature controllers/cryostats:
@@ -98,25 +115,34 @@ class Cryostat(object):
 
 			CryoConnectorPath = spawn.find_executable('CryoConnector.exe')
 
-			# Check for CryoConnector and ask if user wants to install it if it isn't already.
-			if CryoConnectorPath == None and tkMessageBox.askyesno('Install CryoConnector',
-																   'Oxford Cryosystems CryoConnector is required for this functionality. Do you want to install it now?'):
+			# Check for CryoConnector and ask if user wants to install
+			# it if it isn't already.
+			title = 'Install CryoConnector'
+			message = 'Oxford Cryosystems CryoConnector is required for this ' \
+					  'functionality. Do you want to install it now?'
+			if CryoConnectorPath == None and tkMessageBox.askyesno(title,
+																   message):
 				CCinstallerDir = os.path.dirname(os.path.realpath(__file__))
-				CCinstallerPath = os.path.join(CCinstallerDir, 'CryoConnector_ver3500.msi')
+				CCinstallerPath = os.path.join(CCinstallerDir,
+											   'CryoConnector_ver3500.msi')
 				subprocess.call('msiexec /i {} /qf'.format(CCinstallerPath))
 				CryoConnectorPath = spawn.find_executable('CryoConnector.exe')
 
 			if CryoConnectorPath != None:
 				if not self.testMode:
-					# Launch CryoConnector with specified working folder. (This is the default working directory anyway.)
-					# In testMode, the .xml-files in the working folder can be manipulated manually without CC running.
-					self.CryoConnector = subprocess.Popen(CryoConnectorPath + ' /F {}'.format(self.CCWorkingFolder))
+					# Launch CryoConnector with specif. working folder.
+					# (This is the default working directory anyway.)
+					# In testMode, the .xml-files in the working folder
+					# can be manipulated manually without CC running.
+					s = CryoConnectorPath+' /F {}'.format(self.CCWorkingFolder)
+					self.CryoConnector = subprocess.Popen(s)
 
 					# Wait for CryoConnector to start up.
 					time.sleep(0.5)
 
 				try:
-					self.nhelix = CryoConnectorAPI(self.CCWorkingFolder, self.port)
+					self.nhelix = CryoConnectorAPI(self.CCWorkingFolder,
+												   self.port)
 					deviceName = self.nhelix.stat_root[0].get('name')
 					self.index = self.supported_devices.index(deviceName)
 				except:
@@ -140,8 +166,11 @@ class Cryostat(object):
 				self.index = -1
 
 	def chooseCryo(self):
-		""" Window to allow the user to select the brand of temperature controller/ryostat he is using.
-			Selection of specific device is then initiated. """
+		"""
+		Window to allow the user to select the brand of temperature
+		controller/cryostat he is using. Selection of specific device is
+		then initiated.
+		"""
 		self.selectManufacturerWindow = tk.Toplevel()
 		self.selectManufacturerWindow.title('Cryostat/Controller')
 
@@ -169,7 +198,7 @@ class Cryostat(object):
 		:param temperature_A: array of T_A values
     	:return: array of T_sample values, array of T_sample errors
     	"""
-		path = "TA_to_Tsample_calibration_curve_shield.csv"
+		path = 'calibration_curves' + '/' + self.TA_to_Tsample_calibration_curve
 		curve = np.loadtxt(path, delimiter=',', skiprows=2).transpose()
 		lenC = len(curve[0])
 		try:
@@ -216,7 +245,7 @@ class Cryostat(object):
 		:param temperature_sample: array of T_sample values
     	:return: array of T_A values, array of T_A errors
 		"""
-		path = "Tsample_to_TA_calibration_curve_shield.csv"
+		path = 'calibration_curves' + '/' + self.Tsample_to_TA_calibration_curve
 		curve = np.loadtxt(path, delimiter=',', skiprows=2).transpose()
 		lenC = len(curve[0])
 		try:
@@ -259,6 +288,7 @@ class Cryostat(object):
 
 		# When adding a cryostat, please try to include:
 		# _sampleTemp:		Sample temperature in K
+		# _cryoTemp:		Cryostat temperature in K
 		# _deviceName:		Name or handle of the device
 		# _deviceStatus:	Info about the status of the device, e.g. 'Running'
 		# _phaseStatus:		Info about the current phase, e.g. 'Hold at 100K'
@@ -344,6 +374,31 @@ class Cryostat(object):
 				self._deviceStatus = 'Ready'
 				self._alarmStatus = 'No errors or alarms'
 				self._alarmLevel = 0
+
+	# Write or read calibration curves - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+	def setCalibrationCurves(self, TA_to_Tsample_name, Tsample_to_TA_name):
+		"""
+		Updates the calibration curves base names. These files need to
+		be located in the the calibration_curves folder.
+		:param TA_to_Tsample_path: Path to TA_to_Tsample calib. curve
+		:param Tsample_to_TA_path: Path to Tsample_to_TA calib. curve
+		"""
+		self.TA_to_Tsample_calibration_curve = TA_to_Tsample_name
+		self.Tsample_to_TA_calibration_curve = Tsample_to_TA_name
+		curves = np.array([self.TA_to_Tsample_calibration_curve,
+						   self.Tsample_to_TA_calibration_curve])
+		with open('last_used_curves.out', 'w') as file:
+			np.savetxt(file, curves, '%s')
+
+	def getCalibrationCurves(self):
+		"""
+		Reads the currently used calibration curve base names. These
+		files need to be located in the the calibration_curves folder.
+		:return: TA_to_Tsample_name, Tsample_to_TA_name
+		"""
+		return self.TA_to_Tsample_calibration_curve,\
+			   self.Tsample_to_TA_calibration_curve
 
 	# Zone parameter table for Lake Shore controller - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
@@ -490,7 +545,7 @@ class Cryostat(object):
 			self.nhelix.command('Restart')
 
 	def stop(self):
-		""" Stop Operation immediately immediately. """
+		""" Stop Operation immediately. """
 
 		# N-HeliX
 		# Stop gas stream cooler immediately
