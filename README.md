@@ -7,3 +7,5 @@ an easy-to-use graphical user interface.
 
 For details on how to use the software, as well as how to work with and expand
 the individual modules, a brief handbook is provided.
+
+CryoConnector_ver3500.msi is provided by Oxford Cryosystems Ltd.
