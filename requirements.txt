@@ -1,0 +1,6 @@
+###### Requirements ##########
+
+PyVISA
+numpy
+matplotlib
+lakeshore

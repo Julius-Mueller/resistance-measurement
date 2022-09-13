@@ -1,3 +1,9 @@
+"""	This is a wrapper layer that aims to provide uniform communication
+	with different cryostats, such as Oxford Cryosystems cryostats via
+	Cryoconnector, or solutions using a Lakeshore temperature
+	controller. For more documentation, please refer to the handbook.
+"""
+
 import os
 import time
 import subprocess
@@ -18,7 +24,7 @@ class Cryostat(object):
 		Oxford Cryosystems Serial Communication Documentation: https://connect.oxcryo.com/serialcomms/index.html
 		CryoConnector Documentation: https://sites.google.com/a/oxcryo.com/cryoconnector/home
 		 :param port: Port the cryostat is connected to.
-		 :param device: Type of cryostat. Currently supported models are: 'Nhelix'
+		 :param device: Type of cryostat. Currently supported models are: 'N-HeliX', 'MODEL336'
 		 :param CCWorkingFolder: Path of the CryoConnector working folder if using an Oxford cryostat.
 		 :param testMode: Boolean. In test mode, experimental hardware is not actually initialised.
 		 """

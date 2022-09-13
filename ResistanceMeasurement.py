@@ -11,7 +11,6 @@ import tkFileDialog, tkMessageBox
 import getpass
 from threading import Thread
 
-import csv
 import numpy as np
 
 import matplotlib
@@ -24,7 +23,7 @@ import matplotlib.pyplot as plt
 from matplotlib.widgets import Button, TextBox
 
 import pyvisa as visa
-from Cryostat import Cryostat
+from cooler_control.Cryostat import Cryostat
 
 import warnings
 

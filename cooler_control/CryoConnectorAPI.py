@@ -1,3 +1,8 @@
+"""	This module provides python commands to control an Oxford
+	Cryosystems cryo-cooler using their own CryoConnector application.
+	For more documentation, please refer to the handbook.
+"""
+
 import os
 import getpass
 import Tkinter as tk
